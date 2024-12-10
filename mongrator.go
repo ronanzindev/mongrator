@@ -18,13 +18,13 @@ import (
 const migratorCollectionName = "migrations"
 
 type mongoDocument = map[string]interface{}
-type migratorOptions func(*Migrator)
+type migratorOptions func(*Mongrator)
 type migration struct {
 	Collection string    `json:"collection" bson:"collection"`
 	Migration  string    `json:"migration" bson:"migration"`
 	CreatedAt  time.Time `json:"created_at" bson:"created_at"`
 }
-type Migrator struct {
+type Mongrator struct {
 	database         *mongo.Database
 	collections      map[string]any
 	createCollection bool
@@ -33,21 +33,21 @@ type Migrator struct {
 
 // Determines whether a collection should be created when registering a schema
 func ShouldCreateCollection(v bool) migratorOptions {
-	return func(m *Migrator) {
+	return func(m *Mongrator) {
 		m.createCollection = v
 	}
 }
 
 // Enables or disables saving the migration log in the database
 func ShouldSaveMigrations(v bool) migratorOptions {
-	return func(m *Migrator) {
+	return func(m *Mongrator) {
 		m.saveMigration = v
 	}
 }
 
 // Initialize the migrator
-func New(database *mongo.Database, opts ...migratorOptions) *Migrator {
-	migrate := &Migrator{
+func New(database *mongo.Database, opts ...migratorOptions) *Mongrator {
+	migrate := &Mongrator{
 		database:    database,
 		collections: make(map[string]any),
 	}
@@ -67,7 +67,7 @@ func New(database *mongo.Database, opts ...migratorOptions) *Migrator {
 }
 
 // Registers a schema and its corresponding collection for automatic migration during application startup.
-func (m *Migrator) RegisterSchema(collection string, schema any) {
+func (m *Mongrator) RegisterSchema(collection string, schema any) {
 	value := reflect.ValueOf(schema)
 	if value.Kind() != reflect.Struct {
 		log.Printf("Schema of '%s' must be a struct\n", collection)
@@ -106,7 +106,7 @@ func schemaToDocument(schema any) (mongoDocument, error) {
 }
 
 // Detects schema and collection changes, then applies the necessary migrations.
-func (m *Migrator) RunMigrations() {
+func (m *Mongrator) RunMigrations() {
 	var wg sync.WaitGroup
 	for collection, schema := range m.collections {
 		wg.Add(1)
@@ -138,13 +138,13 @@ func (m *Migrator) RunMigrations() {
 	wg.Wait()
 }
 
-func (m *Migrator) saveMigrationLog(message string, collectionName, action string) {
+func (m *Mongrator) saveMigrationLog(message string, collectionName, action string) {
 	migration := migration{Collection: collectionName, Migration: message, CreatedAt: bson.Now()}
 	if _, err := m.database.Collection(migratorCollectionName).InsertOne(context.Background(), migration); err != nil {
 		log.Printf("Error saving migration log when %s\n", action)
 	}
 }
-func (m *Migrator) removeFields(fieldsToRemove mongoDocument, collection *mongo.Collection) {
+func (m *Mongrator) removeFields(fieldsToRemove mongoDocument, collection *mongo.Collection) {
 	collectionName := collection.Name()
 	for field := range fieldsToRemove {
 		_, err := collection.UpdateMany(context.Background(), bson.M{}, bson.M{"$unset": bson.M{field: ""}})
@@ -160,7 +160,7 @@ func (m *Migrator) removeFields(fieldsToRemove mongoDocument, collection *mongo.
 	}
 }
 
-func (m *Migrator) addFields(fieldsToAdd mongoDocument, collection *mongo.Collection) {
+func (m *Mongrator) addFields(fieldsToAdd mongoDocument, collection *mongo.Collection) {
 	collectionName := collection.Name()
 	for field, value := range fieldsToAdd {
 		reflectType := reflect.TypeOf(value)
@@ -187,7 +187,7 @@ func (m *Migrator) addFields(fieldsToAdd mongoDocument, collection *mongo.Collec
 	}
 }
 
-func (m *Migrator) updateFieldsType(fieldsToUpdateType mongoDocument, collection *mongo.Collection) {
+func (m *Mongrator) updateFieldsType(fieldsToUpdateType mongoDocument, collection *mongo.Collection) {
 	collectionName := collection.Name()
 	for field, value := range fieldsToUpdateType {
 		reflectType := reflect.TypeOf(value)
