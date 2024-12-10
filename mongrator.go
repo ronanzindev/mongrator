@@ -31,18 +31,18 @@ type Mongrator struct {
 	saveMigration    bool
 }
 
+func (m *Mongrator) A() {}
+
 // Determines whether a collection should be created when registering a schema
-func ShouldCreateCollection(v bool) migratorOptions {
-	return func(m *Mongrator) {
-		m.createCollection = v
-	}
+func (m *Mongrator) ShouldCreateCollection() *Mongrator {
+	m.createCollection = true
+	return m
 }
 
 // Enables or disables saving the migration log in the database
-func ShouldSaveMigrations(v bool) migratorOptions {
-	return func(m *Mongrator) {
-		m.saveMigration = v
-	}
+func (m *Mongrator) ShouldSaveMigrations() *Mongrator {
+	m.saveMigration = true
+	return m
 }
 
 // Initialize the migrator
@@ -51,9 +51,7 @@ func New(database *mongo.Database, opts ...migratorOptions) *Mongrator {
 		database:    database,
 		collections: make(map[string]any),
 	}
-	for _, opt := range opts {
-		opt(migrate)
-	}
+
 	if migrate.saveMigration {
 		collections, _ := migrate.database.ListCollectionNames(context.Background(), bson.M{})
 		if !slices.Contains(collections, migratorCollectionName) {
@@ -205,6 +203,8 @@ func (m *Mongrator) updateFieldsType(fieldsToUpdateType mongoDocument, collectio
 	}
 }
 func compareFields(prefix string, schema, document, fieldsToAdd, fieldsToRemove, fieldsToUpdateType mongoDocument) {
+	// fmt.Println(schema)
+	// fmt.Println(document)
 	for field, schemaValue := range schema {
 		if field == "id" || field == "_id" || schemaValue == nil {
 			continue
@@ -226,11 +226,16 @@ func compareFields(prefix string, schema, document, fieldsToAdd, fieldsToRemove,
 				docValue = schemaValue
 			}
 		}
+		if _, ok := docValue.(primitive.A); ok {
+			docValue = []interface{}{}
+		}
 		docReflectType := reflect.TypeOf(docValue)
 		if docReflectType.Kind() == reflect.Int32 || docReflectType.Kind() == reflect.Int64 {
 			docReflectType = reflect.TypeOf(schemaValue)
 		}
+		//fmt.Printf("Document : %v -> %v\n", docValue, docReflectType)
 		schemaReflectType := reflect.TypeOf(schemaValue)
+		//fmt.Printf("Schema : %v -> %v\n", field, schemaReflectType)
 		if schemaReflectType != docReflectType {
 			fieldsToUpdateType[fullField] = schemaValue
 			continue
