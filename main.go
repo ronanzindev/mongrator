@@ -1,4 +1,4 @@
-package migrator
+package mongrator
 
 import (
 	"context"
