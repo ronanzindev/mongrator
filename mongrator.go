@@ -6,66 +6,69 @@ import (
 	"log"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"github.com/RonanzinDev/mongrator/types"
+	"github.com/gobeam/stringy"
 	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
 	"gopkg.in/mgo.v2/bson"
 )
 
 const migratorCollectionName = "migrations"
+const collectionFieldName = "migrations_collections_fields"
 
-type mongoDocument = map[string]interface{}
-type migratorOptions func(*Mongrator)
-type migration struct {
-	Collection string    `json:"collection" bson:"collection"`
-	Migration  string    `json:"migration" bson:"migration"`
-	CreatedAt  time.Time `json:"created_at" bson:"created_at"`
-}
-type Mongrator struct {
-	database         *mongo.Database
-	collections      map[string]any
-	createCollection bool
-	saveMigration    bool
-}
-
-func (m *Mongrator) A() {}
-
-// Determines whether a collection should be created when registering a schema
-func (m *Mongrator) ShouldCreateCollection() *Mongrator {
-	m.createCollection = true
-	return m
-}
-
-// Enables or disables saving the migration log in the database
-func (m *Mongrator) ShouldSaveMigrations() *Mongrator {
-	m.saveMigration = true
-	return m
-}
+type (
+	migration struct {
+		Collection string    `json:"collection" bson:"collection"`
+		Migration  string    `json:"migration" bson:"migration"`
+		CreatedAt  time.Time `json:"created_at" bson:"created_at"`
+	}
+	mongrator struct {
+		database           *mongo.Database
+		migrationCol       *mongo.Collection
+		migrationFieldsCol *mongo.Collection
+		collections        map[string]any
+	}
+	mongratorFields struct {
+		Collection string    `bson:"collection"`
+		Fields     document  `bson:"fields"`
+		CreatedAt  time.Time `bson:"created_at"`
+	}
+	fieldsComparation struct {
+		fieldsToAdd, fieldUpdateType map[string]interface{}
+	}
+	document = map[string]string
+)
 
 // Initialize the migrator
-func New(database *mongo.Database, opts ...migratorOptions) *Mongrator {
-	migrate := &Mongrator{
+func New(database *mongo.Database) *mongrator {
+	mongrator := &mongrator{
 		database:    database,
 		collections: make(map[string]any),
 	}
 
-	if migrate.saveMigration {
-		collections, _ := migrate.database.ListCollectionNames(context.Background(), bson.M{})
-		if !slices.Contains(collections, migratorCollectionName) {
-			if err := migrate.database.CreateCollection(context.Background(), "migrations"); err != nil {
-				log.Printf("Error to create 'migrations' collection. Err -> %s", err.Error())
-			}
+	collections, _ := mongrator.database.ListCollectionNames(context.Background(), bson.M{})
+	if !slices.Contains(collections, migratorCollectionName) {
+		if err := mongrator.database.CreateCollection(context.Background(), migratorCollectionName); err != nil {
+			log.Printf("Error to create 'migrations' collection. Err -> %s", err.Error())
 		}
 	}
-	return migrate
-
+	if !slices.Contains(collections, collectionFieldName) {
+		if err := mongrator.database.CreateCollection(context.Background(), collectionFieldName); err != nil {
+			log.Printf("Error to create 'migrations' collection. Err -> %s", err.Error())
+		}
+	}
+	mongratorCol := mongrator.database.Collection(migratorCollectionName)
+	mongratorFieldsCol := mongrator.database.Collection(collectionFieldName)
+	mongrator.migrationCol = mongratorCol
+	mongrator.migrationFieldsCol = mongratorFieldsCol
+	return mongrator
 }
 
 // Registers a schema and its corresponding collection for automatic migration during application startup.
-func (m *Mongrator) RegisterSchema(collection string, schema any) {
+func (m *mongrator) RegisterSchema(collection string, schema any) {
 	value := reflect.ValueOf(schema)
 	if value.Kind() != reflect.Struct {
 		log.Printf("Schema of '%s' must be a struct\n", collection)
@@ -77,218 +80,208 @@ func (m *Mongrator) RegisterSchema(collection string, schema any) {
 		return
 	}
 	if !slices.Contains(collections, collection) {
-		if !m.createCollection {
-			log.Printf("Collection '%s' does not exist", collection)
-			return
-		}
 		err = m.database.CreateCollection(context.Background(), collection)
 		if err != nil {
 			log.Printf("Error create collection '%s', err -> %s", collection, err.Error())
 			return
 		}
 	}
+	var savedFields mongratorFields
+	err = m.migrationFieldsCol.FindOne(context.Background(), bson.M{"collection": collection}).Decode(&savedFields)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			fields := make(document)
+			extractSchemaFields("", schema, fields)
+			savedFields := mongratorFields{
+				Collection: collection,
+				Fields:     fields,
+			}
+			if _, err := m.migrationFieldsCol.InsertOne(context.Background(), savedFields); err != nil {
+				log.Printf("Error saving fields from '%s' collection", collection)
+				return
+			}
+		}
+	}
 	m.collections[collection] = schema
 }
 
-func schemaToDocument(schema any) (mongoDocument, error) {
-	documentSchema := make(mongoDocument)
-	jsonBytes, err := bson.Marshal(schema)
-	if err != nil {
-		return documentSchema, err
-	}
-	err = bson.Unmarshal(jsonBytes, &documentSchema)
-	if err != nil {
-		return documentSchema, err
-	}
-	return documentSchema, nil
-}
-
-// Detects schema and collection changes, then applies the necessary migrations.
-func (m *Mongrator) RunMigrations() {
+func (m *mongrator) RunMigrations() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	var wg sync.WaitGroup
 	for collection, schema := range m.collections {
 		wg.Add(1)
-		go func(collection string, schema any) {
+		go func(name string, schema any) {
 			defer wg.Done()
-			var document mongoDocument
-			mapSchema, err := schemaToDocument(schema)
-			if err != nil {
-				log.Println(err)
+			var collectionFields mongratorFields
+			if err := m.migrationFieldsCol.FindOne(ctx, bson.M{"collection": collection}).Decode(&collectionFields); err != nil {
+				log.Printf("Error to get fields from collection '%s', err -> %s", collection, err.Error())
 				return
 			}
-			col := m.database.Collection(collection)
-			if err := col.FindOne(context.Background(), bson.M{}, options.FindOne().SetSort(bson.M{"$natural": -1})).Decode(&document); err != nil {
-				if err == mongo.ErrNoDocuments {
-					return
-				}
-				log.Printf("Error fetching document from collection %s: %v\n", collection, err)
-				return
+			schemaFields := make(document)
+			extractSchemaFields("", schema, schemaFields)
+			updateFields := make(document)
+			schemaCollection := m.database.Collection(collection)
+			compareFields(collectionFields.Fields, schemaFields, updateFields)
+			if len(updateFields) > 0 {
+				m.updateFields(updateFields, schemaCollection, collectionFields.Fields)
+				m.updateMigrationFields(collection, updateFields, collectionFields.Fields)
 			}
-			fieldsToAdd := make(map[string]interface{})
-			fieldsToRemove := make(map[string]interface{})
-			fieldsToUpdateType := make(map[string]interface{})
-			compareFields("", mapSchema, document, fieldsToAdd, fieldsToRemove, fieldsToUpdateType)
-			m.addFields(fieldsToAdd, col)
-			m.updateFieldsType(fieldsToUpdateType, col)
-			m.removeFields(fieldsToRemove, col)
+			fieldsToRemove := getRemovedFields(collectionFields.Fields, schemaFields)
+			if len(fieldsToRemove) > 0 {
+				m.removeFields(fieldsToRemove, schemaCollection)
+				m.removeFieldsFromMongratorCollection(fieldsToRemove, collection, collectionFields.Fields)
+			}
 		}(collection, schema)
 	}
 	wg.Wait()
 }
-
-func (m *Mongrator) saveMigrationLog(message string, collectionName, action string) {
-	migration := migration{Collection: collectionName, Migration: message, CreatedAt: bson.Now()}
-	if _, err := m.database.Collection(migratorCollectionName).InsertOne(context.Background(), migration); err != nil {
+func (m *mongrator) saveMigrationLog(message string, collection string, action string) {
+	migration := migration{Collection: collection, Migration: message, CreatedAt: bson.Now()}
+	if _, err := m.migrationCol.InsertOne(context.Background(), migration); err != nil {
 		log.Printf("Error saving migration log when %s\n", action)
 	}
 }
-func (m *Mongrator) removeFields(fieldsToRemove mongoDocument, collection *mongo.Collection) {
+func (m *mongrator) updateFields(fields document, collection *mongo.Collection, collectionSchema document) {
 	collectionName := collection.Name()
-	for field := range fieldsToRemove {
+	for field, value := range fields {
+		var action string
+		var actionLog string
+		typeValue, ok := types.Types[value]
+		if !ok {
+			continue
+		}
+		if _, ok := collectionSchema[field]; ok {
+			action = "updated"
+			actionLog = "updating"
+		} else {
+			action = "added"
+			actionLog = "adding"
+		}
+		if strings.Contains(field, "[]") {
+			if _, ok := collectionSchema[field]; !ok {
+				splitedField := strings.Split(field, ".")
+				if len(splitedField) > 1 {
+					fieldName := splitedField[0]
+					_, err := collection.UpdateMany(context.Background(), bson.M{}, bson.M{"$set": bson.M{fieldName: make([]any, 0)}})
+					if err != nil {
+						log.Printf("Error to added array to collection '%s', err -> %s", collectionName, err.Error())
+						continue
+					}
+				}
+			}
+		}
+		_, err := collection.UpdateMany(context.Background(), bson.M{}, bson.M{"$set": bson.M{field: typeValue}})
+		if err != nil {
+			log.Printf("Error %s field '%s' -> collection' %s': %v\n", action, field, collectionName, err)
+			continue
+		}
+		message := fmt.Sprintf("Field '%s' %s -> collection '%s'", field, action, collectionName)
+		m.saveMigrationLog(message, collectionName, actionLog+" fields")
+		log.Printf("%s\n", message)
+	}
+
+}
+func (m *mongrator) updateMigrationFields(collection string, fields, collectionSchema document) {
+	value := fields
+	for field, value := range value {
+		collectionSchema[field] = value
+	}
+	if _, err := m.migrationFieldsCol.UpdateOne(context.Background(), bson.M{"collection": collection}, bson.M{"$set": bson.M{"fields": collectionSchema, "updated_at": bson.Now()}}); err != nil {
+		log.Printf("Error updating migration fields from collection : '%s'", collection)
+	}
+
+}
+func (m *mongrator) removeFields(fielsToRemove []string, collection *mongo.Collection) {
+	collectionName := collection.Name()
+	for _, field := range fielsToRemove {
 		_, err := collection.UpdateMany(context.Background(), bson.M{}, bson.M{"$unset": bson.M{field: ""}})
 		if err != nil {
-			log.Printf("Error removing field '%s' from collection '%s': %v\n", field, collectionName, err)
-		} else {
-			message := fmt.Sprintf("Field  '%s' removed from collection '%s'", field, collectionName)
-			if m.saveMigration {
-				m.saveMigrationLog(message, collectionName, "removing fields")
-			}
-			log.Printf("%s\n", message)
-		}
-	}
-}
-
-func (m *Mongrator) addFields(fieldsToAdd mongoDocument, collection *mongo.Collection) {
-	collectionName := collection.Name()
-	for field, value := range fieldsToAdd {
-		reflectType := reflect.TypeOf(value)
-		var data any
-		if reflectType.Kind() == reflect.Slice {
-			data = []interface{}{}
-		} else if reflectType.Kind() == reflect.Array {
-			data = reflect.MakeSlice(reflectType, reflectType.Len(), reflectType.Len()+1).Interface()
-		} else if reflectType.Kind() == reflect.Map {
-			data = value
-		} else {
-			data = reflect.Zero(reflectType).Interface()
-		}
-		_, err := collection.UpdateMany(context.Background(), bson.M{}, bson.M{"$set": bson.M{field: data}})
-		if err != nil {
-			log.Printf("Error adding field '%s' to collection' %s': %v\n", field, collectionName, err)
-		} else {
-			message := fmt.Sprintf("Field '%s' added to collection '%s'", field, collectionName)
-			if m.saveMigration {
-				m.saveMigrationLog(message, collectionName, "adding fields")
-			}
-			log.Printf("%s\n", message)
-		}
-	}
-}
-
-func (m *Mongrator) updateFieldsType(fieldsToUpdateType mongoDocument, collection *mongo.Collection) {
-	collectionName := collection.Name()
-	for field, value := range fieldsToUpdateType {
-		reflectType := reflect.TypeOf(value)
-		data := reflect.Zero(reflectType).Interface()
-		_, err := collection.UpdateMany(context.Background(), bson.M{}, bson.M{"$set": bson.M{field: data}})
-		if err != nil {
-			log.Printf("Error updating type of field '%s' in collection '%s': %v\n", field, collectionName, err)
-		} else {
-			message := fmt.Sprintf("Field type of '%s' updated in collection '%s'\n", field, collectionName)
-			if m.saveMigration {
-				m.saveMigrationLog(message, collectionName, "updating fields type")
-			}
-			log.Printf("%s\n", message)
-		}
-	}
-}
-func compareFields(prefix string, schema, document, fieldsToAdd, fieldsToRemove, fieldsToUpdateType mongoDocument) {
-	// fmt.Println(schema)
-	// fmt.Println(document)
-	for field, schemaValue := range schema {
-		if field == "id" || field == "_id" || schemaValue == nil {
+			log.Printf("Error to remove field '%s' from collection '%s'", field, collectionName)
 			continue
 		}
-		fullField := field
+		log.Printf("Field '%s' removed from collection '%s'", field, collectionName)
+	}
+}
+func (m *mongrator) removeFieldsFromMongratorCollection(fielsToRemove []string, collection string, collectionSchema document) {
+	value := collectionSchema
+	for _, field := range fielsToRemove {
+		delete(value, field)
+	}
+	if _, err := m.migrationFieldsCol.UpdateMany(context.Background(), bson.M{"collection": collection}, bson.M{"$set": bson.M{"fields": value}}); err != nil {
+		log.Printf("Error to remove field from mongrator field collections")
+	}
+}
+func compareFields(collectionFields, schemaFields, fieldsToUpdate document) {
+	for field, value := range schemaFields {
+		if field == "id" || field == "_id" {
+			continue
+		}
+		collectionValue, ok := collectionFields[field]
+		if !ok {
+			fieldsToUpdate[field] = value
+			continue
+		}
+		if value != collectionValue {
+			fieldsToUpdate[field] = value
+			continue
+		}
+	}
+}
+
+func getRemovedFields(collectionFields, schemaFields document) []string {
+	fieldsToRemove := make([]string, 0)
+	for field := range collectionFields {
+		if field == "id" || field == "_id" {
+			continue
+		}
+		if _, ok := schemaFields[field]; !ok {
+			fieldsToRemove = append(fieldsToRemove, field)
+		}
+	}
+	return fieldsToRemove
+}
+
+func extractSchemaFields(prefix string, schema any, fields map[string]string) {
+	dataValue := reflect.ValueOf(schema)
+	dataType := dataValue.Type()
+	if dataType.Kind() != reflect.Struct {
+		log.Printf("Schema '%s' must be a struct", dataType.Name())
+		return
+	}
+	for i := 0; i < dataType.NumField(); i++ {
+		field := dataType.Field(i)
+		fieldValue := dataValue.Field(i)
+		fieldTag := field.Tag.Get("bson")
+		if fieldTag == "" || strings.Contains(fieldTag, "-") {
+			log.Printf("Field '%s' of schema '%s' must has a bson tag", field.Name, dataValue.Type().Name())
+			continue
+		}
+		if fieldTag == "id" || fieldTag == "_id" {
+			continue
+		}
+		fullField := fieldTag
 		if prefix != "" {
-			fullField = prefix + "." + field
+			fullField = prefix + "." + fullField
 		}
-		docValue, exist := document[field]
-		if !exist {
-			fieldsToAdd[fullField] = schemaValue
-			continue
-		}
-		if docValue == nil {
-			docValue = schemaValue
-		}
-		if _, ok := docValue.(primitive.DateTime); ok {
-			if _, ok := schemaValue.(time.Time); ok {
-				docValue = schemaValue
+		switch fieldValue.Kind() {
+		case reflect.Struct:
+			if fieldValue.Type().Name() == "Time" {
+				str := stringy.New(field.Name).SnakeCase().ToLower()
+				fields[str] = "time"
+				continue
 			}
-		}
-		if _, ok := docValue.(primitive.A); ok {
-			docValue = []interface{}{}
-		}
-		docReflectType := reflect.TypeOf(docValue)
-		if docReflectType.Kind() == reflect.Int32 || docReflectType.Kind() == reflect.Int64 {
-			docReflectType = reflect.TypeOf(schemaValue)
-		}
-		//fmt.Printf("Document : %v -> %v\n", docValue, docReflectType)
-		schemaReflectType := reflect.TypeOf(schemaValue)
-		//fmt.Printf("Schema : %v -> %v\n", field, schemaReflectType)
-		if schemaReflectType != docReflectType {
-			fieldsToUpdateType[fullField] = schemaValue
-			continue
-		}
-
-		// Check if the field is a struct
-		if schemaMap, ok := schemaValue.(map[string]interface{}); ok {
-			if docMap, ok := docValue.(map[string]interface{}); ok {
-				compareFields(fullField, schemaMap, docMap, fieldsToAdd, fieldsToRemove, fieldsToUpdateType)
+			extractSchemaFields(fullField, fieldValue.Interface(), fields)
+		case reflect.Slice:
+			elemType := fieldValue.Type().Elem()
+			if elemType.Kind() == reflect.Struct {
+				value := reflect.Zero(elemType).Interface()
+				extractSchemaFields(fullField+".$[]", value, fields)
 			} else {
-				fieldsToUpdateType[fullField] = schemaValue
+				fields[fullField] = "slice"
 			}
-			continue
-		}
-		// // Check if the fiels is an array
-		if schemaArray, ok := schemaValue.([]interface{}); ok {
-			if docArray, ok := docValue.([]interface{}); ok {
-				compareFieldsArray(fullField, schemaArray, docArray, fieldsToAdd, fieldsToUpdateType)
-			} else {
-				fieldsToUpdateType[fullField] = schemaValue
-			}
-			continue
-		}
-	}
-	// Check extra fields
-	for field := range document {
-		if field == "_id" || field == "id" {
-			continue
-		}
-		fullField := field
-		if prefix != "" {
-			fullField = prefix + "." + field
-		}
-		if _, exists := schema[field]; !exists {
-			fieldsToRemove[fullField] = struct{}{}
-		}
-	}
-}
-
-func compareFieldsArray(field string, schemaArray, docArray []interface{}, fieldsToAdd, fieldsToUpdateType map[string]interface{}) {
-	if len(schemaArray) > 0 && len(docArray) > 0 {
-		schemaElem := schemaArray[0]
-		docElem := docArray[0]
-		if reflect.TypeOf(schemaElem) != reflect.TypeOf(docElem) {
-			fieldsToUpdateType[field] = schemaArray
-			return
-		}
-		if schemaMap, ok := schemaElem.(map[string]interface{}); ok {
-			if docMap, ok := docElem.(map[string]interface{}); ok {
-				compareFields(field+"[]", schemaMap, docMap, fieldsToAdd, nil, fieldsToUpdateType)
-			} else {
-				fieldsToUpdateType[field] = schemaArray
-			}
+		default:
+			fields[fullField] = fieldValue.Kind().String()
 		}
 	}
 }
