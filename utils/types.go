@@ -1,4 +1,4 @@
-package types
+package utils
 
 import "gopkg.in/mgo.v2/bson"
 

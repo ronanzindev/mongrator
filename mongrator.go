@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/RonanzinDev/mongrator/types"
+	"github.com/RonanzinDev/mongrator/utils"
 	"github.com/gobeam/stringy"
 	"go.mongodb.org/mongo-driver/mongo"
 	"gopkg.in/mgo.v2/bson"
@@ -147,7 +147,7 @@ func (m *mongrator) updateFields(fields document, collection *mongo.Collection, 
 	for field, value := range fields {
 		var action string
 		var actionLog string
-		typeValue, ok := types.Types[value]
+		typeValue, ok := utils.Types[value]
 		if !ok {
 			continue
 		}
