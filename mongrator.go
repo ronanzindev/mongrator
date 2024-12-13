@@ -25,7 +25,7 @@ type (
 		Migration  string    `json:"migration" bson:"migration"`
 		CreatedAt  time.Time `json:"created_at" bson:"created_at"`
 	}
-	mongrator struct {
+	Mongrator struct {
 		database           *mongo.Database
 		migrationCol       *mongo.Collection
 		migrationFieldsCol *mongo.Collection
@@ -43,8 +43,8 @@ type (
 )
 
 // Initialize the migrator
-func New(database *mongo.Database) *mongrator {
-	mongrator := &mongrator{
+func New(database *mongo.Database) *Mongrator {
+	mongrator := &Mongrator{
 		database:    database,
 		collections: make(map[string]any),
 	}
@@ -68,7 +68,7 @@ func New(database *mongo.Database) *mongrator {
 }
 
 // Registers a schema and its corresponding collection for automatic migration during application startup.
-func (m *mongrator) RegisterSchema(collection string, schema any) {
+func (m *Mongrator) RegisterSchema(collection string, schema any) {
 	value := reflect.ValueOf(schema)
 	if value.Kind() != reflect.Struct {
 		log.Printf("Schema of '%s' must be a struct\n", collection)
@@ -105,7 +105,7 @@ func (m *mongrator) RegisterSchema(collection string, schema any) {
 	m.collections[collection] = schema
 }
 
-func (m *mongrator) RunMigrations() {
+func (m *Mongrator) RunMigrations() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var wg sync.WaitGroup
@@ -136,13 +136,13 @@ func (m *mongrator) RunMigrations() {
 	}
 	wg.Wait()
 }
-func (m *mongrator) saveMigrationLog(message string, collection string, action string) {
+func (m *Mongrator) saveMigrationLog(message string, collection string, action string) {
 	migration := migration{Collection: collection, Migration: message, CreatedAt: bson.Now()}
 	if _, err := m.migrationCol.InsertOne(context.Background(), migration); err != nil {
 		log.Printf("Error saving migration log when %s\n", action)
 	}
 }
-func (m *mongrator) updateFields(fields document, collection *mongo.Collection, collectionSchema document) {
+func (m *Mongrator) updateFields(fields document, collection *mongo.Collection, collectionSchema document) {
 	collectionName := collection.Name()
 	for field, value := range fields {
 		var action string
@@ -182,7 +182,7 @@ func (m *mongrator) updateFields(fields document, collection *mongo.Collection, 
 	}
 
 }
-func (m *mongrator) updateMigrationFields(collection string, fields, collectionSchema document) {
+func (m *Mongrator) updateMigrationFields(collection string, fields, collectionSchema document) {
 	value := fields
 	for field, value := range value {
 		collectionSchema[field] = value
@@ -192,7 +192,7 @@ func (m *mongrator) updateMigrationFields(collection string, fields, collectionS
 	}
 
 }
-func (m *mongrator) removeFields(fielsToRemove []string, collection *mongo.Collection) {
+func (m *Mongrator) removeFields(fielsToRemove []string, collection *mongo.Collection) {
 	collectionName := collection.Name()
 	for _, field := range fielsToRemove {
 		_, err := collection.UpdateMany(context.Background(), bson.M{}, bson.M{"$unset": bson.M{field: ""}})
@@ -203,7 +203,7 @@ func (m *mongrator) removeFields(fielsToRemove []string, collection *mongo.Colle
 		log.Printf("Field '%s' removed from collection '%s'", field, collectionName)
 	}
 }
-func (m *mongrator) removeFieldsFromMongratorCollection(fielsToRemove []string, collection string, collectionSchema document) {
+func (m *Mongrator) removeFieldsFromMongratorCollection(fielsToRemove []string, collection string, collectionSchema document) {
 	value := collectionSchema
 	for _, field := range fielsToRemove {
 		delete(value, field)
