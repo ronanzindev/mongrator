@@ -250,38 +250,48 @@ func extractSchemaFields(prefix string, schema any, fields map[string]string) {
 		return
 	}
 	for i := 0; i < dataType.NumField(); i++ {
-		field := dataType.Field(i)
-		fieldValue := dataValue.Field(i)
-		fieldTag := field.Tag.Get("bson")
-		if fieldTag == "" || strings.Contains(fieldTag, "-") {
-			log.Printf("Field '%s' of schema '%s' must has a bson tag", field.Name, dataValue.Type().Name())
-			continue
+		dataValue := reflect.ValueOf(schema)
+		dataType := dataValue.Type()
+		if dataType.Kind() != reflect.Struct {
+			log.Printf("Schema '%s' must be a struct", dataType.Name())
+			return
 		}
-		if fieldTag == "id" || fieldTag == "_id" {
-			continue
-		}
-		fullField := fieldTag
-		if prefix != "" {
-			fullField = prefix + "." + fullField
-		}
-		switch fieldValue.Kind() {
-		case reflect.Struct:
-			if fieldValue.Type().Name() == "Time" {
-				str := stringy.New(field.Name).SnakeCase().ToLower()
-				fields[str] = "time"
+		for i := 0; i < dataType.NumField(); i++ {
+			field := dataType.Field(i)
+			fieldValue := dataValue.Field(i)
+			fieldTag := field.Tag.Get("bson")
+			if fieldTag == "" || strings.Contains(fieldTag, "-") {
 				continue
 			}
-			extractSchemaFields(fullField, fieldValue.Interface(), fields)
-		case reflect.Slice:
-			elemType := fieldValue.Type().Elem()
-			if elemType.Kind() == reflect.Struct {
-				value := reflect.Zero(elemType).Interface()
-				extractSchemaFields(fullField+".$[]", value, fields)
-			} else {
-				fields[fullField] = "slice"
+			if strings.Contains(fieldTag, "id") || strings.Contains(fieldTag, "_id") {
+				continue
 			}
-		default:
-			fields[fullField] = fieldValue.Kind().String()
+			if bsonTags := strings.Split(fieldTag, ","); len(bsonTags) > 2 {
+				fieldTag = bsonTags[0]
+			}
+			fullField := fieldTag
+			if prefix != "" {
+				fullField = prefix + "." + fullField
+			}
+			switch fieldValue.Kind() {
+			case reflect.Struct:
+				if fieldValue.Type().Name() == "Time" {
+					str := stringy.New(field.Name).SnakeCase().ToLower()
+					fields[str] = "time"
+					continue
+				}
+				extractSchemaFields(fullField, fieldValue.Interface(), fields)
+			case reflect.Slice:
+				elemType := fieldValue.Type().Elem()
+				if elemType.Kind() == reflect.Struct {
+					value := reflect.Zero(elemType).Interface()
+					extractSchemaFields(fullField+".$[]", value, fields)
+				} else {
+					fields[fullField] = "slice"
+				}
+			default:
+				fields[fullField] = fieldValue.Kind().String()
+			}
 		}
 	}
 }
