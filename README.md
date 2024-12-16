@@ -35,7 +35,7 @@ import (
 type User struct {
 	Name     string    `json:"name" bson:"name"`
 	Addrees  Addrees   `json:"address" bson:"address"`
-	Contacts []Contact `json:"contacts" bson:"contacts"`
+	Contacts []Contact `json:"contacts" bson:"contacts,omitempty"`
 }
 type Addrees struct {
 	Street string `json:"street" bson:"street"`
@@ -61,14 +61,5 @@ func main() {
 }
 ```
 
-
-## Configuration
-You can customize Mongrator's behavior with optional configurations:
-```golang
-migrator := mongrator.New(db).ShouldCreateCollection().ShouldSaveMigrations()
-```
-### Avaliable options
-* `ShouldCreateCollection`: Determines whether a collection should be created when registering a schema
-* `ShouldSaveMigrations`: // Enables saving the migration log in the database
 ### Contributing
 If you encounter any issues, feel free to open an [Issue](https://github.com/RonanzinDev/mongrator/issues/new/choose) :)
