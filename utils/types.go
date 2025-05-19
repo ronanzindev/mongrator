@@ -2,7 +2,7 @@ package utils
 
 import "gopkg.in/mgo.v2/bson"
 
-var Types = map[string]any{
+var DefaultTypesValues = map[string]any{
 	"string":  "",
 	"int":     int(0),
 	"int32":   int32(0),
@@ -12,4 +12,5 @@ var Types = map[string]any{
 	"slice":   make([]any, 0),
 	"bool":    false,
 	"time":    bson.Now(),
+	"struct":  struct{}{},
 }

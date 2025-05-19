@@ -61,5 +61,20 @@ func main() {
 }
 ```
 
+### Options
+
+You can define default type values:
+
+```go
+mongrator.DefaultBooleanType(true),
+mongrator.DefaultIntType(1),
+mongrator.DefaultInt32Type(2),
+mongrator.DefaultIntType(3),
+mongrator.DefaultFloat32Type(4.5),
+mongrator.DefaultFloat64Type(5.5),
+mongrator.DefaultStringType("completed"),
+mongrator.DefaultTimeType(time.Now()),
+```
+
 ### Contributing
 If you encounter any issues, feel free to open an [Issue](https://github.com/RonanzinDev/mongrator/issues/new/choose) :)
